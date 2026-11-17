@@ -23,11 +23,12 @@ export interface StreamToolUseInputEvent {
 
 export interface StreamMessageStartEvent {
   type: "message_start";
-  role: "assistant";
+  messageId: string;
 }
 
 export interface StreamMessageDoneEvent {
   type: "message_done";
+  stopReason: string;
   usage: Usage;
 }
 
