@@ -1,21 +1,14 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const VERSION = "0.1.0";
 
-function version(): string {
-  const pkg = JSON.parse(readFileSync(join(here, "../../package.json"), "utf8")) as { version: string };
-  return pkg.version;
-}
-
-function main(argv: string[]): void {
-  if (argv.includes("--version") || argv.includes("-v")) {
-    console.log(version());
-    return;
+function main(): void {
+  if (process.argv.includes("--version") || process.argv.includes("-v")) {
+    console.log(`easy-agent v${VERSION}`);
+    process.exit(0);
   }
-  console.log(`easy-agent ${version()}`);
+
+  console.log("Hello, Agent CLI!");
 }
 
-main(process.argv.slice(2));
+main();
