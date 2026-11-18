@@ -108,25 +108,34 @@ export function App({ model, system }: AppProps): React.ReactNode {
     [model, system],
   );
 
-  // 键盘输入：加载中 Esc/Ctrl+C 中断，空闲时 Ctrl+C 退出，Enter 提交。
+  // 键盘输入：Ctrl+C 中断当前请求，Ctrl+D 退出，Enter 提交。
   useInput((input, key) => {
+    // Ctrl+C：中断当前请求
     if (key.ctrl && input === "c") {
-      if (isLoading) {
-        abortRef.current?.abort();
-      } else {
-        exit();
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+        setIsLoading(false);
+        setStreamingText("");
+        setInfoMessage("Interrupted.");
       }
       return;
     }
 
-    if (isLoading) {
-      if (key.escape) abortRef.current?.abort();
+    // Ctrl+D：退出程序
+    if (key.ctrl && input === "d") {
+      exit();
       return;
     }
 
+    // 正在加载时忽略普通输入
+    if (isLoading) return;
+
+    // 回车：提交消息
     if (key.return) {
-      const text = inputValue.trim();
-      if (text) void handleSubmit(text);
+      const text = inputValue;
+      setInputValue("");
+      void handleSubmit(text);
       return;
     }
 
