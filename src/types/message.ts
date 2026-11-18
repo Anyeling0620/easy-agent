@@ -30,3 +30,6 @@ export interface AssistantMessage {
   role: "assistant";
   content: string | ContentBlock[];
 }
+
+// 会话历史里的一条消息，可能是任一角色
+export type MessageParam = UserMessage | AssistantMessage;
