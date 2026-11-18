@@ -1,7 +1,9 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
-import { streamMessage } from "../services/api/stream.js";
-import type { AssistantMessage, ContentBlock, MessageParam, UserMessage } from "../types/message.js";
+import { streamMessage, type StreamResult } from "../services/api/stream.js";
+import type { ContentBlock, MessageParam, UserMessage } from "../types/message.js";
+import type { StreamEvent } from "../types/stream.js";
+import { toolsApiParams } from "../tools/index.js";
 import { Spinner } from "./components/Spinner.js";
 
 interface AppProps {
@@ -49,14 +51,55 @@ export function App({ model, system }: AppProps): React.ReactNode {
   const messagesRef = useRef<MessageParam[]>([]);
   messagesRef.current = messages;
 
-  /** 发送一条用户消息并流式接收回复；abort 通过 signal 检查后跳出循环。 */
+  /** 跑一整轮流式请求：逐事件更新 UI，返回最终结果供上层拼进对话历史。 */
+  const runStreamingTurn = useCallback(
+    async (
+      currentMessages: MessageParam[],
+      signal?: AbortSignal,
+    ): Promise<StreamResult | null> => {
+      const generator = streamMessage({
+        messages: [...currentMessages],
+        model,
+        system,
+        tools: toolsApiParams.length > 0 ? toolsApiParams : undefined,
+        signal,
+      });
+
+      let accumulatedText = "";
+
+      while (true) {
+        const { value, done } = await generator.next();
+        if (done) return value ?? null;
+
+        const event = value as StreamEvent;
+        switch (event.type) {
+          case "text":
+            accumulatedText += event.text;
+            setStreamingText(accumulatedText); // 触发重渲染，终端实时更新
+            break;
+          case "tool_use_start":
+            setToolCalls((prev) => [...prev, { id: event.id, name: event.name }]);
+            setSpinnerLabel(`Calling ${event.name}`);
+            break;
+          case "message_done":
+            setLastUsage({ input: event.usage.input_tokens, output: event.usage.output_tokens });
+            break;
+          case "error":
+            setErrorText(event.message);
+            return null;
+        }
+      }
+    },
+    [model, system],
+  );
+
+  /** 发送一条用户消息：追加到历史、跑一轮流式请求、把回复写回历史。 */
   const handleSubmit = useCallback(
     async (text: string) => {
       const userMessage: UserMessage = { role: "user", content: text };
       const history: MessageParam[] = [...messagesRef.current, userMessage];
 
       setMessages(history);
-      setInputValue("");
       setIsLoading(true);
       setStreamingText("");
       setToolCalls([]);
@@ -65,39 +108,18 @@ export function App({ model, system }: AppProps): React.ReactNode {
 
       const controller = new AbortController();
       abortRef.current = controller;
-      let assistantText = "";
 
       try {
-        const gen = streamMessage({ messages: history, model, system });
-        for await (const event of gen) {
-          if (controller.signal.aborted) break;
-
-          switch (event.type) {
-            case "text":
-              assistantText += event.text;
-              setStreamingText(assistantText);
-              break;
-            case "tool_use_start":
-              setToolCalls((prev) => [...prev, { id: event.id, name: event.name }]);
-              setSpinnerLabel(`Calling ${event.name}`);
-              break;
-            case "message_done":
-              setLastUsage({ input: event.usage.input_tokens, output: event.usage.output_tokens });
-              break;
-            case "error":
-              setErrorText(event.message);
-              break;
-          }
-        }
-
-        if (controller.signal.aborted) {
-          setInfoMessage("已中断");
-        } else if (assistantText) {
-          const reply: AssistantMessage = { role: "assistant", content: assistantText };
-          setMessages((prev) => [...prev, reply]);
+        const result = await runStreamingTurn(history, controller.signal);
+        if (result) {
+          setMessages((prev) => [...prev, result.assistantMessage]);
         }
       } catch (err) {
-        setErrorText(err instanceof Error ? err.message : String(err));
+        if (controller.signal.aborted) {
+          setInfoMessage("Interrupted.");
+        } else {
+          setErrorText(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         abortRef.current = null;
         setIsLoading(false);
@@ -105,7 +127,7 @@ export function App({ model, system }: AppProps): React.ReactNode {
         setStreamingText("");
       }
     },
-    [model, system],
+    [runStreamingTurn],
   );
 
   // 键盘输入：Ctrl+C 中断当前请求，Ctrl+D 退出，Enter 提交。

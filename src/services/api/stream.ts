@@ -1,6 +1,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { getAnthropicClient, DEFAULT_MODEL, DEFAULT_MAX_TOKENS } from "./client.js";
-import type { ContentBlock, TextBlock, UserMessage, AssistantMessage } from "../../types/message.js";
+import type {
+  ContentBlock, TextBlock, UserMessage, AssistantMessage, ToolDefinition,
+} from "../../types/message.js";
 import type { Usage, StreamEvent } from "../../types/stream.js";
 
 export interface StreamRequestParams {
@@ -8,6 +10,8 @@ export interface StreamRequestParams {
   system?: string;
   model?: string;
   maxTokens?: number;
+  tools?: ToolDefinition[];
+  signal?: AbortSignal;
 }
 
 export interface StreamResult {
@@ -21,14 +25,19 @@ export async function* streamMessage(
 ): AsyncGenerator<StreamEvent, StreamResult> {
   const client = getAnthropicClient();
 
-  const stream = client.messages.stream({
-    model: params.model ?? DEFAULT_MODEL,
-    max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-    // 自研类型兼容 OpenAI 接口，此处桥接到 SDK 类型
-    messages: params.messages as Anthropic.MessageParam[],
-    stream: true,
-    ...(params.system && { system: params.system }),
-  });
+  const stream = client.messages.stream(
+    {
+      model: params.model ?? DEFAULT_MODEL,
+      max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+      // 自研类型兼容 OpenAI 接口，此处桥接到 SDK 类型
+      messages: params.messages as Anthropic.MessageParam[],
+      stream: true,
+      ...(params.system && { system: params.system }),
+      ...(params.tools?.length && { tools: params.tools as Anthropic.ToolUnion[] }),
+    },
+    // signal 交给 SDK，中断时底层 HTTP 请求一并取消
+    { signal: params.signal },
+  );
 
   const contentBlocks: ContentBlock[] = [];
   let currentToolInputJson = "";
