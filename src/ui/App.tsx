@@ -1,9 +1,10 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
 import { streamMessage, type StreamResult } from "../services/api/stream.js";
-import type { ContentBlock, MessageParam, UserMessage } from "../types/message.js";
+import type { ContentBlock, MessageParam } from "../types/message.js";
 import type { StreamEvent } from "../types/stream.js";
-import { toolsApiParams } from "../tools/index.js";
+import { executeTools, toolsApiParams } from "../tools/index.js";
+import { MAX_TOOL_TURNS } from "../core/index.js";
 import { Spinner } from "./components/Spinner.js";
 
 interface AppProps {
@@ -93,41 +94,96 @@ export function App({ model, system }: AppProps): React.ReactNode {
     [model, system],
   );
 
-  /** 发送一条用户消息：追加到历史、跑一轮流式请求、把回复写回历史。 */
+  /** 用户回车后的完整流程：slash 命令拦截，否则进入 Agentic Loop。 */
   const handleSubmit = useCallback(
     async (text: string) => {
-      const userMessage: UserMessage = { role: "user", content: text };
-      const history: MessageParam[] = [...messagesRef.current, userMessage];
+      if (!text.trim()) return;
+      const trimmed = text.trim();
 
-      setMessages(history);
-      setIsLoading(true);
+      // Slash commands 本地拦截
+      if (trimmed === "/exit" || trimmed === "/quit") { exit(); return; }
+      if (trimmed === "/clear") {
+        setMessages([]);
+        messagesRef.current = [];
+        setInfoMessage("Conversation cleared.");
+        return;
+      }
+      if (trimmed === "/history") {
+        setInfoMessage(`${messagesRef.current.length} messages in conversation.`);
+        return;
+      }
+
+      // 重置 UI 状态
       setStreamingText("");
       setToolCalls([]);
       setErrorText(null);
       setInfoMessage(null);
+      setIsLoading(true);
+      setSpinnerLabel("Thinking");
 
-      const controller = new AbortController();
-      abortRef.current = controller;
+      // 追加 user message，创建本轮消息数组
+      const userMsg: MessageParam = { role: "user", content: trimmed };
+      let loopMessages: MessageParam[] = [...messagesRef.current, userMsg];
+      setMessages(loopMessages);
+      messagesRef.current = loopMessages;
+
+      const abort = new AbortController();
+      abortRef.current = abort;
+
+      let totalIn = 0;
+      let totalOut = 0;
 
       try {
-        const result = await runStreamingTurn(history, controller.signal);
-        if (result) {
-          setMessages((prev) => [...prev, result.assistantMessage]);
+        let turnCount = 0;
+        // Agentic Loop：AI 调用工具 → 执行 → 结果喂回去 → 循环
+        while (turnCount < MAX_TOOL_TURNS) {
+          turnCount++;
+          setStreamingText("");
+
+          const result = await runStreamingTurn(loopMessages, abort.signal);
+          if (!result || abort.signal.aborted) break;
+
+          totalIn += result.usage.input_tokens;
+          totalOut += result.usage.output_tokens;
+
+          // 追加 assistant message
+          const assistantMsg: MessageParam = {
+            role: "assistant",
+            content: result.assistantMessage.content,
+          };
+          loopMessages = [...loopMessages, assistantMsg];
+          setMessages(loopMessages);
+          messagesRef.current = loopMessages;
+
+          // 如果 AI 想调工具 → 执行工具 → 追加 tool_result → 继续循环
+          if (result.stopReason === "tool_use") {
+            const contentBlocks = result.assistantMessage.content;
+            if (Array.isArray(contentBlocks)) {
+              const toolResultMsg = await executeTools(contentBlocks, abort.signal);
+              loopMessages = [...loopMessages, toolResultMsg];
+              setMessages(loopMessages);
+              messagesRef.current = loopMessages;
+              setSpinnerLabel("Thinking");
+              continue;
+            }
+          }
+          break; // stop_reason 不是 tool_use → 对话结束
         }
-      } catch (err) {
-        if (controller.signal.aborted) {
+
+        setLastUsage({ input: totalIn, output: totalOut });
+      } catch (err: unknown) {
+        // SDK 中断抛的是 APIUserAbortError，统一按 signal 判断
+        if (abort.signal.aborted) {
           setInfoMessage("Interrupted.");
         } else {
           setErrorText(err instanceof Error ? err.message : String(err));
         }
       } finally {
-        abortRef.current = null;
         setIsLoading(false);
-        setSpinnerLabel("Thinking");
-        setStreamingText("");
+        abortRef.current = null;
       }
     },
-    [runStreamingTurn],
+    [exit, runStreamingTurn],
   );
 
   // 键盘输入：Ctrl+C 中断当前请求，Ctrl+D 退出，Enter 提交。
