@@ -255,9 +255,8 @@ export function App({ model, system }: AppProps): React.ReactNode {
         if (msg.role === "user" && typeof msg.content === "string") {
           return (
             <Box key={`u${i}`} marginTop={1}>
-              {/* 箭头保留原绿色，正文白字配黑底，整行底色一致 */}
-              <Text backgroundColor="black" color="green" bold>{"❯ "}</Text>
-              <Text backgroundColor="black" color="white">{msg.content}</Text>
+              <Text color="green" bold>{"❯ "}</Text>
+              <Text>{msg.content}</Text>
             </Box>
           );
         }
