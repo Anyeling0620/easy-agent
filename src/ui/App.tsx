@@ -1,6 +1,7 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
 import { streamMessage, type StreamResult } from "../services/api/stream.js";
+import { DEFAULT_MODEL } from "../services/api/client.js";
 import type { ContentBlock, MessageParam } from "../types/message.js";
 import type { StreamEvent } from "../types/stream.js";
 import { executeTools, toolsApiParams } from "../tools/index.js";
@@ -15,17 +16,16 @@ interface AppProps {
 interface ToolCallInfo {
   id: string;
   name: string;
+  resultLength?: number;
 }
 
-/** 把消息内容里的文本块拼成可显示的字符串；工具块只显示名称。 */
-function renderContent(content: string | ContentBlock[]): string {
+/** 只取 assistant 消息里的文本块拼成展示文本；工具块不显示在对话区。 */
+function extractAssistantText(msg: MessageParam): string {
+  const { content } = msg;
   if (typeof content === "string") return content;
   return content
-    .map((b) => {
-      if (b.type === "text") return b.text;
-      if (b.type === "tool_use") return `[tool: ${b.name}]`;
-      return "[tool result]";
-    })
+    .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
     .join("");
 }
 
@@ -160,6 +160,20 @@ export function App({ model, system }: AppProps): React.ReactNode {
             const contentBlocks = result.assistantMessage.content;
             if (Array.isArray(contentBlocks)) {
               const toolResultMsg = await executeTools(contentBlocks, abort.signal);
+              // 回填每个工具调用的结果长度，UI 用它把 ⚡ 换成 ✓
+              setToolCalls((prev) =>
+                prev.map((tc) => {
+                  const result = toolResultMsg.content.find((r) => r.tool_use_id === tc.id);
+                  if (!result) return tc;
+                  const length = typeof result.content === "string"
+                    ? result.content.length
+                    : result.content.reduce(
+                        (n, b) => n + (b.type === "text" ? b.text.length : 0),
+                        0,
+                      );
+                  return { ...tc, resultLength: length };
+                }),
+              );
               loopMessages = [...loopMessages, toolResultMsg];
               setMessages(loopMessages);
               messagesRef.current = loopMessages;
@@ -228,34 +242,73 @@ export function App({ model, system }: AppProps): React.ReactNode {
   }, { isActive: isRawModeSupported });
 
   return (
-    <Box flexDirection="column">
-      {messages.map((message, index) => (
-        <Box key={index} flexDirection="column">
-          <Text color={message.role === "user" ? "cyan" : "green"}>
-            {message.role === "user" ? "> " : ""}
-            {renderContent(message.content)}
-          </Text>
+    <Box flexDirection="column" paddingX={1}>
+      {/* 头部 */}
+      <Box marginBottom={1}>
+        <Text bold color="cyan">Easy Agent</Text>
+        <Text dimColor> ({model ?? DEFAULT_MODEL})</Text>
+      </Box>
+      <Text dimColor>Type a message to start. Ctrl+C to interrupt, Ctrl+D to exit.</Text>
+
+      {/* 对话历史：user + assistant 交替 */}
+      {messages.map((msg, i) => {
+        if (msg.role === "user" && typeof msg.content === "string") {
+          return (
+            <Box key={`u${i}`} marginTop={1}>
+              <Text color="green" bold>{"❯ "}</Text>
+              <Text>{msg.content}</Text>
+            </Box>
+          );
+        }
+        if (msg.role === "assistant") {
+          const text = extractAssistantText(msg);
+          if (text) {
+            return (
+              <Box key={`a${i}`}>
+                <Text color="magenta">{"▎ "}</Text>
+                <Text>{text}</Text>
+              </Box>
+            );
+          }
+        }
+        return null;
+      })}
+
+      {/* 工具调用指示器 */}
+      {toolCalls.map((tc, i) => (
+        <Box key={`tc${i}`} marginLeft={2}>
+          {tc.resultLength !== undefined
+            ? <Text color="green">{"✓ "}{tc.name} ({tc.resultLength} chars)</Text>
+            : <Text color="yellow">{"⚡ Using tool: "}{tc.name}</Text>}
         </Box>
       ))}
 
-      {streamingText ? <Text>{streamingText}</Text> : null}
+      {/* Spinner：等待 API 响应时显示 */}
+      {isLoading && !streamingText && <Spinner label={spinnerLabel} />}
 
-      {toolCalls.map((call) => (
-        <Text key={call.id} dimColor>
-          [tool: {call.name}]
-        </Text>
-      ))}
+      {/* 流式文本：API 正在回复时实时显示 */}
+      {isLoading && streamingText && (
+        <Box>
+          <Text color="magenta">{"▎ "}</Text>
+          <Text>{streamingText}</Text>
+        </Box>
+      )}
 
-      {isLoading ? <Spinner label={spinnerLabel} /> : null}
-      {infoMessage ? <Text color="yellow">[info] {infoMessage}</Text> : null}
-      {errorText ? <Text color="red">[error] {errorText}</Text> : null}
-      {lastUsage && !isLoading ? (
-        <Text dimColor>
-          [usage] {lastUsage.input} in / {lastUsage.output} out
-        </Text>
-      ) : null}
+      {/* 错误 / 信息 / token 用量 */}
+      {errorText && <Text color="red">{"✗ "}{errorText}</Text>}
+      {infoMessage && <Text dimColor>{"  "}{infoMessage}</Text>}
+      {lastUsage && !isLoading && (
+        <Text dimColor>{"  tokens: "}{lastUsage.input} in / {lastUsage.output} out</Text>
+      )}
 
-      {!isLoading ? <Text color="gray">{"> "}{inputValue}</Text> : null}
+      {/* 输入行 */}
+      {!isLoading && (
+        <Box marginTop={1}>
+          <Text color="green" bold>{"❯ "}</Text>
+          <Text>{inputValue}</Text>
+          <Text dimColor>▋</Text>
+        </Box>
+      )}
     </Box>
   );
 }
